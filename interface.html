@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset=utf-8>
+<title>Link Checker</title>
+<link type="text/css" href="css/interface.css" rel="stylesheet">
+</head>
+
+<body>
+<div id="fullpage">
+  <div id="header">
+    <div id="htitle">
+      <svg width="270px" height="54px">
+      <filter id="drop-shadow" filterUnits="userSpaceOnUse" width="100%" height="64">
+        <feGaussianBlur in="SourceAlpha" result="blur-out" stdDeviation="2" />
+        <feOffset in="blur-out" result="shadowoffset" dx="4" dy="4"/>
+        <feBlend in="SourceGraphic" in2="shadowoffset" mode="normal"/>
+	      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.8"/>
+        </feComponentTransfer>
+      </filter>
+      <linearGradient id="shaded" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="20%" stop-color="#eef" stop-opacity="0"/>
+        <stop offset="80%" stop-color="#ccd" />
+      </linearGradient>
+      <text font-size="48" fill="url(#shaded)" filter="url(#drop-shadow)" stroke="#666" stroke-width="1px"
+        x="24px" y="45px"  font-family="Rondalo, Arial">Link View
+      </text>
+      </svg>
+      by Scriptol
+    </div>
+    <div id="toolbar">
+      Local folder  <input type="text" id="localdir" value="" style="width:200px;">
+      Website  <input type="text" id="website" value="" style="width:280px;">
+      <button class="button blue" onclick="listTree()">Check</button>
+      <button class="button red" id="stopbutton" onclick="stopResume()">Stop</button>
+      <div id="optionbar" >
+      <form name="form1">
+        <span class="labelle">Show internal links  <input type="checkbox" class="prettycb" id="optInt"> </span> 
+        <span class="labelle">Show linked pages <input type="checkbox" class="prettycb" id="optView" checked></span>
+        <span class="labelle">Duration  <input type="text" id="dispTime" value="2" style="width:32px;text-align:right"></span> 
+      </form>
+        <div id="title"></div>
+    </div>
+    </div>
+ 
+  </div> <!-- header -->
+  
+<div id="middle">
+  <div id="checker">  </div>
+  <div id="container-viewer">
+  <iframe id="viewer"  src="viewer.html" sandbox="allow-scripts" loading="lazy">
+  </iframe>
+  </div>
+</div>  <!--middle-->
+
+  
+  <script>
+    /* Link View
+      (c) 2016-2026 scriptol.com/scriptol.fr
+      Free under the GNU GPL 3 License. */
+    var website="";
+    var source="";
+    var PAGES={};
+
+    const ws = new WebSocket('ws://localhost:3000')
+    let currentPath = ''
+    const viewer = document.getElementById('viewer')  
+    let viewOpt =  document.getElementById('optView').checked
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      if (data.type == 'PAGE_INFO') {
+          var page = data.fileName
+          var n1 = data.nlinks
+          if (typeof retrieveLinks === "function") {
+              retrieveLinks(data.content);
+              if (typeof selectLinks === "function") selectLinks(links);
+          }
+          let n2 = links.length
+          if(n1 > 0 || n2 > 0) {
+            document.getElementById('checker').innerHTML += "<br><b>" + page + " (" + n1 +")</b>";      
+          }  
+      }
+      else if (data.type == 'CHECKED') { // display result of a link check
+        if(data.status != "OK") {
+          document.getElementById('checker').innerHTML += "<br>" + data.status + " " + data.code + " <a href='" + data.link + "' target='_blank' class='red'>"+ data.link + "</a>";
+        } 
+        else if(viewOpt) {
+          document.getElementById('checker').innerHTML += "<br>" + data.status + " " + data.code + " <a href='" + data.link + "' target='_blank'>"+ data.link + "</a>";
+        }        
+      } 
+      else if(data.type == "html" || data.type == "image" || data.type == "raw" ) {
+        viewer.contentWindow.postMessage(event.data, "*");
+        document.getElementById('title').innerHTML = data.link 
+      } 
+      else if (data.type === 'COMPLETED') {
+        document.getElementById('checker').innerHTML += "<br><b>Completed " + data.total + " checked, " + data.broken + " broken</b>"
+      }      
+      else if (data.type === 'ERROR') {
+        alert("Error: " + data.message);
+      }
+      waitUntilReady().then(() => {
+        ws.send(JSON.stringify({ ready: true }));
+      });
+ 
+    } // on message
+
+    function waitUntilReady() {
+        return new Promise((resolve) => {
+          const interval = setInterval(() => {
+            if (document.getElementById('stopbutton').innerHTML === "Stop") {
+              clearInterval(interval);
+              resolve();
+            }
+          }, 50); // 50 ms
+        });
+    }
+
+
+    function listTree() { 
+      links=[]; 
+      const path = document.getElementById('localdir').value
+      const site = document.getElementById('website').value
+      const optInt = document.getElementById('optInt').checked
+      const optView = document.getElementById('optView').checked
+      const dispTime =  document.getElementById('dispTime').value
+      document.getElementById('checker').innerHTML = ""
+      ws.send(JSON.stringify({ type: 'SCAN', "path": path, "site": site, "all": optInt, "view": optView, "pause": dispTime }));
+    }
+
+    function readFile(name) {
+      ws.send(JSON.stringify({ type: 'READ_FILE', path: currentPath + '/' + name }));
+    }
+
+    function stopResume() {
+      let b = document.getElementById('stopbutton')
+      let state = b.innerHTML;
+      if(state == "Stop") {
+        b.innerHTML = "Resume"
+      }
+      else {
+        b.innerHTML = "Stop"
+      }  
+      
+    }
+
+    window.addEventListener("unload", function (event) {
+      ws.send(JSON.stringify({ type: 'STOP' }));                  
+    });
+
+    </script>
+
+<div id="footer">
+  Copyright 2026 Scriptol.com/Scriptol.fr
+</div>
+</div> <!--fullpage-->
+</body>
+</html>

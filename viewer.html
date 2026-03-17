@@ -1,0 +1,60 @@
+
+<!-- viewer.html (c) 2026 Scriptol.com/Scriptol.fr -->
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Viewer</title>
+</head>
+<body>
+
+<script>
+  window.addEventListener("message", event => {
+    const msg = JSON.parse(event.data);
+
+    document.body.innerHTML = ""; // remove childs
+    if (!msg.data || typeof msg.data !== 'string') {
+      return;
+    }
+
+    if (msg.type === "html") {
+      const ifr = document.createElement("iframe");
+      ifr.style.width = "100%";
+      ifr.style.height = "100vh";
+      ifr.style.border = "none";
+      ifr.srcdoc = `<base href="${msg.link}" target="_self">${msg.data}`;
+      document.body.appendChild(ifr);             
+    }
+    else if (msg.type === "image") {
+      const img = new Image();
+      img.src = msg.data
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        document.body.appendChild(canvas);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+      };
+    }
+    else if (msg.type === "raw") {
+      const pre = document.createElement("pre");
+      pre.textContent = msg.data;
+      document.body.appendChild(pre);
+    }
+    else if(msg.type === 'pdf') {
+      const embed = document.createElement("embed");
+      embed.src = msg.data; // for "data:application/pdf;base64,..."
+      embed.type = "application/pdf";
+      embed.style.width = "100%";
+      embed.style.height = "100vh"; 
+      document.body.appendChild(embed);
+    }
+    else if (msg.type === "error") {
+      document.body.innerHTML = "<h2>Error : " + msg.message + "</h2>";
+    }
+  });
+</script>
+
+</body>
+</html>
