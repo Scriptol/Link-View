@@ -136,7 +136,6 @@
       const optInt = document.getElementById('optInt').checked
       const optView = document.getElementById('optView').checked
       const dispTime =  document.getElementById('dispTime').value
-      document.getElementById('checker').innerHTML = ""
       ws.send(JSON.stringify({ type: 'SCAN', "path": path, "site": site, "all": optInt, "view": optView, "pause": dispTime }));
     }
 
