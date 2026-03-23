@@ -8,7 +8,7 @@ const WebSocket = require('ws');
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
-const { exec, spawn } = require('child_process');
+const { exec, spawn, spawnSync } = require('child_process');
 
 try {
     const localdirContent = fs.readFileSync(path.join(__dirname, 'localdir.js'), 'utf8');
@@ -28,7 +28,7 @@ var checkResult = ""
 var DEBUG=false;
 var website="";
 var root="";
-var PAGES={};
+var checkedLinks=[];
 
 
 function beforeExit() {
@@ -143,6 +143,8 @@ function extractLinks(html) {
     return Array.from(links);
 }
 
+// for future extensions
+
 function openBrowser(url, pause) {
     console.log("open browser " + url + " " + pause)
   const platform = process.platform;
@@ -219,9 +221,6 @@ const server = http.createServer((req, res) => {
 // WebSocket
 
 const wss = new WebSocket.Server({ server });
-let checkedList = [];
-var fileContent = ""
-var stopEvent = false
 
 function waitForClientReady(ws) {
     return new Promise((resolve) => {
@@ -302,77 +301,184 @@ function fetchUrl(targetUrl, ws) {
     });
 }
 
+function isCurlInstalled() {
+    const result = spawnSync('curl', ['--version'], { encoding: 'utf8' });
+    if (result.error && result.error.code === 'ENOENT') {
+        return false;
+    }
+    return result.status === 0;
+}
+
+
+function goCurl(url, ws) {
+    return new Promise((resolve, reject) => {
+        const curl = spawn("curl", ["-siL", url]);
+
+        let rawResponse = "";
+
+        curl.stdout.on("data", (data) => {
+            rawResponse += data.toString();
+        });
+
+
+        curl.stderr.on("data", (data) => {
+            console.error(`Error Curl: ${data}`);
+        });
+
+        curl.on("error", (err) => {
+            reject(err);
+        });        
+   
+        curl.on("close", (code) => {
+            const parts = rawResponse.split(/\r?\n\r?\n/);
+            const headers = parts[0] || "";
+            const body = parts.slice(1).join("\n\n");
+
+            const statusMatch = headers.match(/HTTP\/\d(?:\.\d)?\s+(\d{3})/);
+            const httpCode = statusMatch ? parseInt(statusMatch[1], 10) : 0;
+            
+            const contentType = parseContentType(headers);
+            
+            if(DEBUG) console.log(`Code HTTP: ${httpCode}, Content-Type: ${contentType}`);
+
+            if (contentType.startsWith("image/") || contentType.includes("pdf")) {
+                fetchBinary(url, ws, contentType.includes("pdf") ? "pdf" : "image", contentType);
+            } else {
+                ws.send(JSON.stringify({
+                    type: "html",
+                    data: body || "<html><body>Contenu vide</body></html>",
+                    link: url
+                }));
+            }
+            resolve(httpCode);
+        });
+    });
+}
+
+function parseContentType(headers) {
+    const match = headers.match(/content-type:\s*([^\n\r]+)/i);
+    return match ? match[1].trim().toLowerCase() : "unknown";
+}
+
+function fetchBinary(url, ws, type, mimeType) {
+    const curl = spawn("curl", ["-sL", url]); // -L redirections
+    let chunks = [];
+
+    curl.stdout.on("data", (chunk) => {
+        chunks.push(chunk);
+    });
+
+    curl.on("close", (code) => {
+        if (code === 0) {
+            const buffer = Buffer.concat(chunks);
+            const base64Data = buffer.toString("base64");
+
+            const formattedData = `data:${mimeType};base64,${base64Data}`;
+
+            ws.send(JSON.stringify({
+                type: type, // image ou pdf
+                mime: mimeType,
+                data: formattedData, 
+                link: url
+            }));
+            
+            if(DEBUG) console.log(`Curl sent ${type} successfully (${buffer.length} bytes)`);
+        } else {
+            console.error(`Curl can not retrieve binary file : ${code}`);
+        }
+    });
+
+    curl.on("error", (err) => {
+        console.error("Échec du processus curl binaire:", err);
+    });
+}
+
+function isArchive(url) {
+    const ext = getExtension(url)
+    if(ext == "zip" || ext =="gz" || ext == "gzip") {
+        return true
+    } 
+    return false       
+}
+
 
 wss.on('connection', (ws) => {
     console.log("Connected");
 
+    var hasCurl = isCurlInstalled();
+    const msg = "Curl is " + (hasCurl == true ? "installed" : "not installed");
+    console.log(msg);
+    ws.send(JSON.stringify({
+        type: 'MESSAGE',
+        msg: msg,
+    }));
+
     ws.on('message', async (msg) => {
         const data = JSON.parse(msg);
 
-        if(data.type=== 'SCAN')  {
-            var optInt = data.all
-            var optView = data.view
-            var pause = data.pause
+        if (data.type === 'SCAN') {
+            var optInt = data.all;
+            var optView = data.view;
+            var pause = data.pause;
             start(data.site, data.path);
-            console.log("Found " + FilesArray.length + " files")
-            var siteRoot = addProtocol(data.site) + "/"
-            var locLength = data.path.length
+            console.log("Found " + FilesArray.length + " files");
+            var siteRoot = addProtocol(data.site) + "/";
+            var locLength = data.path.length;
 
-            for(const filePath of FilesArray) {
-                let newpage = true
+            for (const filePath of FilesArray) {
+                let newpage = true;
                 try {
-                    if(!optInt && (filePath.indexOf(data.site) != "-1") ) continue
+                    if (!optInt && (filePath.indexOf(data.site) != "-1")) continue;
                     const html = fs.readFileSync(filePath, 'utf8');
-                    if(!html) {
-                        console.log("Err "+ filePath + " not read.")
+                    if (!html) {
+                        console.log("Err " + filePath + " not read.");
                         continue;
                     }
                     const links = extractLinks(html);
-                    var subDir = filePath.slice(locLength + 1)
-                    let lio = subDir.lastIndexOf("/")
-                    if(lio == -1) {
-                        subDir = ""
+                    var subDir = filePath.slice(locLength + 1);
+                    let lio = subDir.lastIndexOf("/");
+                    if (lio == -1) {
+                        subDir = "";
+                    } else {
+                        subDir = subDir.slice(0, lio + 1);
                     }
-                    else {
-                        subDir = subDir.slice(0, lio + 1)
-                    }    
 
                     for (var link of links) {
-                        if(!hasProtocol(link)) {
-                            if(link[0]=="/") {
-                                link = siteRoot + link
+                        if (!hasProtocol(link)) {
+                            if (link[0] == "/") {
+                                link = siteRoot + link;
+                            } else {
+                                link = siteRoot + subDir + link;
                             }
-                            else {
-                                link = siteRoot + subDir + link
-                            }
-                        }    
-  
-                        let [status, code] = await getStatus(link);
-                        if(DEBUG) console.log(status + " " + code + " " +link)
-                        const isInternal = link.startsWith(siteRoot);
-                        const toDisplay = optView && !isInternal
-
-                        if(newpage && ((status !== "OK") || toDisplay)) {
-                            newpage = false
-                            ws.send(JSON.stringify({ 
-                                type: 'PAGE_INFO',  
-                                fileName: filePath, 
-                                content : html,
-                                nlinks : links.length
-                            }))  
                         }
-                        let skipped = false
-                                
-                        if (toDisplay && (status === "OK" || code===301)) {
-                            const url = new URL(link).href;
-                            const ext = getExtension(url)
-                            if(ext == "zip" || ext =="gz" || ext == "gzip") {
-                                skipped = true;
-                                continue;
-                            }    
 
-                            fetchUrl(url,ws)
-                   
+                        if(checkedLinks.includes(link)) continue;
+
+                        let [reqStatus, code] = await getStatus(link);
+
+                        if (DEBUG) console.log("getStatus " + reqStatus + " " + code + " " + link);
+                        const isInternal = link.startsWith(siteRoot);
+                        let toDisplay = optView && !isInternal;
+
+                        if (newpage && ((reqStatus !== "OK") || toDisplay)) {
+                            newpage = false;
+                            ws.send(JSON.stringify({
+                                type: 'PAGE_INFO',
+                                fileName: filePath,
+                                content: html,
+                                nlinks: links.length
+                            }));
+                        }
+                        let itsArchive = isArchive(link)
+                      
+                        // Using curl
+                        if (hasCurl && (code == 403 || code == 406) && !itsArchive) {
+                            try {
+                                var ccode = await goCurl(link, ws);
+                                if (DEBUG) console.log("Code HTTP curl returns " + ccode + " " + link);
+                            } catch (error) {
+                                console.error("Fatal error calling goCurl :", error);
+                            }
                             await new Promise((resolve) => {
                                 ws.once("message", (msg) => {
                                     const data = JSON.parse(msg);
@@ -380,50 +486,67 @@ wss.on('connection', (ws) => {
                                 });
                             });
                             await new Promise(resolve => setTimeout(resolve, pause * 1000));
-                        } 
-                          
-                        if(status != "OK" || (optView && !isInternal) || skipped)
+                            reqStatus = (ccode == 200 ? "OK": "Curl");
+                            code = ccode;
+                            toDisplay = true  // for the link only
+                        }
+                        else
+                        // Using fetchUrl/https
+                        if (toDisplay && (reqStatus === "OK" || code === 301) && !itsArchive) {
+                            const url = new URL(link).href;
+                            fetchUrl(url, ws);
+
+                            await new Promise((resolve) => {
+                                ws.once("message", (msg) => {
+                                    const data = JSON.parse(msg);
+                                    if (data.ready) resolve();
+                                });
+                            });
+                            await new Promise(resolve => setTimeout(resolve, pause * 1000));
+                        }
+
+                        if(code==200 || code==302) checkedLinks.push(link) // forget checked valid links
+
+                        if (reqStatus != "OK" || toDisplay) {
                             ws.send(JSON.stringify({
                                 type: "CHECKED",
-                                link : link, 
-                                code : code,
-                                status: status
-                            }));  
-                        //} 
-                    } // for
+                                link: link,
+                                code: code,
+                                status: reqStatus
+                            }));
+                        }                        
+                    } // for (var link of links)
+                } catch (e) {
+                    console.log(`error ${link} :`, e.message);
                 }
-                catch(e)  {
-                    console.log(`error ${link} :`, e.message);                    
-                } 
-            } // for   
-            console.log("Completed " + CHECKS +" checked, " + BROCOUNT + " broken.")
+            } // (const filePath of FilesArray)
+
+            console.log("Completed " + CHECKS + " checked, " + BROCOUNT + " broken.");
             ws.send(JSON.stringify({
                 type: "COMPLETED",
                 total: CHECKS,
                 broken: BROCOUNT
-            }));  
-        } // SCAN
+            }));
+        } // FIN de SCAN
 
-        if( data.type === 'STOP') {
+        if (data.type === 'STOP') {
             stopEvent = true;
-        } // exit  
+        }
 
-        if( data.type === 'RESUME') {
+        if (data.type === 'RESUME') {
             stopEvent = false;
-        } // exit          
-        
-    
-        if( data.type === 'EXIT') {
+        }
+
+        if (data.type === 'EXIT') {
             server.close(() => {
                 beforeExit();
-                console.log("App closed.")
+                console.log("App closed.");
                 process.kill(process.pid, 'SIGINT');
-            })         
-        } // exit    
+            });
+        }
+    }); // FIN de ws.on('message')
+}); // FIN de wss.on('connection')
 
-    }) // message
-    
-}) // connection
 
 // ------------------------------------------------------
 server.listen(3000, () => {

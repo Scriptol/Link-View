@@ -69,16 +69,22 @@
     let viewOpt =  document.getElementById('optView').checked
 
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+        const data = JSON.parse(event.data);
+      try {
+      if (data.type == 'MESSAGE') { 
+          document.getElementById('checker').innerHTML += "<b>" + data.msg + "</b>";      
+      }
 
       if (data.type == 'PAGE_INFO') {
           var page = data.fileName
           var n1 = data.nlinks
+          /*
           if (typeof retrieveLinks === "function") {
               retrieveLinks(data.content);
               if (typeof selectLinks === "function") selectLinks(links);
           }
           let n2 = links.length
+          */
           if(n1 > 0 || n2 > 0) {
             document.getElementById('checker').innerHTML += "<br><b>" + page + " (" + n1 +")</b>";      
           }  
@@ -104,6 +110,10 @@
       waitUntilReady().then(() => {
         ws.send(JSON.stringify({ ready: true }));
       });
+      }
+      catch(e) {
+        viewer.contentWindow.postMessage(e.message, "*"); 
+      }
  
     } // on message
 

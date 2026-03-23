@@ -52,7 +52,7 @@ function pathMerge(path,filename)   {
 function getExtension(path)  {
    var pos=path.lastIndexOf(".");
    if(pos!=-1) {
-       return path.slice(pos);
+       return path.slice(pos+1);
    }
    return "";
 }
