@@ -22,23 +22,9 @@ try {
 
 var CHECKS=0;
 var BROCOUNT=0;
-var CHECKOK=0;
-var broken=["Links report:"];
-var checkResult = "" 
 var DEBUG=false;
-var website="";
-var root="";
 var checkedLinks=[];
-
-
-function beforeExit() {
-    process.on("exit", function() {
-        console.log(CHECKS + " links verified.")        
-        var s = (BROCOUNT > 1 ? "s" : "")
-        console.log(BROCOUNT + " broken link" + s + ".")
-        console.log("Done.")
-    })
-}
+var stopEvent = false
 
 
 function rewriteHTML(html, baseURL) {
@@ -222,47 +208,47 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server });
 
-function waitForClientReady(ws) {
-    return new Promise((resolve) => {
-        ws.once("message", (msg) => {
-            const data = JSON.parse(msg);
-            if (data.ready === true) resolve();
-        });
-    });
-}
-
 function fetchUrl(targetUrl, ws) {
     const protocol = targetUrl.startsWith('https') ? https : http; 
     const options = {
         headers: {
             "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36",
-            'Accept': '*/*',
-            'Accept-Language': '*',
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9,fr;q=0.8"
         }         
     };
 
-    protocol.get(targetUrl, options, (res) => {
+    const req = protocol.get(targetUrl, options, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
             let newUrl = res.headers.location;
             if (!newUrl.startsWith('http')) {
-                const origin = new URL(targetUrl);
-                newUrl = origin.origin + newUrl;
+                newUrl = new URL(newUrl, targetUrl).href;
             }
             return fetchUrl(newUrl, ws); 
         }
 
         let chunks = [];
-        res.on('data', chunk => chunks.push(chunk));
+        let rawResponse = "";
+        res.on("data", chunk => {
+            rawResponse += chunk.toString();
+            chunks.push(chunk);
+        });
+        
         res.on('end', () => {
             const buffer = Buffer.concat(chunks);
             const mime = res.headers["content-type"] || "text/plain";
 
-            if (mime.includes("text/html")) {
+            if (mime.startsWith("text/html")) {
                 const rawHtml = buffer.toString("utf8");
-                if (!rawHtml || rawHtml.trim().length === 0) {
+                if (!rawHtml.trim()) {
                     return ws.send(JSON.stringify({ type: "error", message: "Empty HTML content" }));
                 }
-                const rewritten = rewriteHTML(rawHtml, targetUrl);
+                let rewritten;
+                try {
+                    rewritten = rewriteHTML(rawHtml, targetUrl);
+                } catch (e) {
+                    rewritten = rawHtml;
+                }
                 ws.send(JSON.stringify({
                     type: "html",
                     data: rewritten || "<html><body>No content available</body></html>", 
@@ -278,7 +264,7 @@ function fetchUrl(targetUrl, ws) {
                 link:targetUrl
                 }));
             }
-            else if (mime === "application/pdf") {
+            else if (mime.includes("pdf")) {
                 const base64Pdf = buffer.toString("base64");
                 ws.send(JSON.stringify({
                     type: "pdf",
@@ -296,9 +282,14 @@ function fetchUrl(targetUrl, ws) {
                 }));
             }
         });
-    }).on('error', (err) => {
+    });
+    req.on('error', (err) => {
         ws.send(JSON.stringify({ type: 'error', message: err.message }));
     });
+    req.setTimeout(8000, () => {
+        req.destroy();
+        ws.send(JSON.stringify({ type: "error", message: "Timeout" }));
+    });    
 }
 
 function isCurlInstalled() {
@@ -401,12 +392,47 @@ function isArchive(url) {
     return false       
 }
 
+function getSubdirectory(path) {
+    const original = path;
+    path = path.replace(/\\/g, '/');
+    if (path.startsWith('/')) {
+        path = path.slice(1);
+    }
+    path = path.replace(/\/+$/, '');
+    const parts = path.split('/');
+    if (parts.length < 2) return "";
+    const hasTrailingSlash = /\/$/.test(original);
+    const dirParts = hasTrailingSlash ? parts : parts.slice(0, -1);
+    return dirParts.join('/') + "/";
+}
+
+function computeSiteRoot(siteRoot, localRoot) {
+    if (!siteRoot.startsWith("http://") && !siteRoot.startsWith("https://")) {
+        siteRoot = "https://" + siteRoot;
+    }
+    if (!siteRoot.endsWith("/")) siteRoot += "/";
+    localRoot = localRoot.replace(/\\/g, "/"); // Windows → Unix
+    if (!localRoot.endsWith("/")) localRoot += "/";
+    const parts = localRoot.split("/");
+    parts.pop(); // enlever le dernier élément vide dû au slash final
+
+    const baseDir = parts.slice(0, 2).join("/") + "/"; // c:/dir/
+    const subPath = localRoot.slice(baseDir.length);   // subdir/
+    return siteRoot + subPath;
+}
+
+
+var counter = 0;
+
+function updateCounter(ws) {
+    ws.send(JSON.stringify({ "type": "COUNTER", "counter" : counter  }));    
+}
 
 wss.on('connection', (ws) => {
     console.log("Connected");
 
     var hasCurl = isCurlInstalled();
-    const msg = "Curl is " + (hasCurl == true ? "installed" : "not installed");
+    const msg = "Curl " + (hasCurl == true ? "found and may be used" : "not found");
     console.log(msg);
     ws.send(JSON.stringify({
         type: 'MESSAGE',
@@ -417,62 +443,71 @@ wss.on('connection', (ws) => {
         const data = JSON.parse(msg);
 
         if (data.type === 'SCAN') {
-            var optInt = data.all;
-            var optView = data.view;
-            var pause = data.pause;
+            if(data.path == "" || data.site == "") {
+                console.log("Directory and domain empty")
+                return
+            }
+            let optInt = data.all;
+            let optView = data.view;
+            let pause = data.pause;
             start(data.site, data.path);
             console.log("Found " + FilesArray.length + " files");
-            var siteRoot = addProtocol(data.site) + "/";
-            var locLength = data.path.length;
+
+            counter = FilesArray.length;
+            updateCounter(ws)
+
+            let siteRoot = addProtocol(data.site);
+            if(siteRoot.substr(siteRoot.length - 1) != "/") siteRoot += "/"
+            let localRoot = data.path;
+            if(localRoot.substr(localRoot.length - 1) != "/") localRoot += "/"
+            let locLength = localRoot.length;
+
+            let siteDir = computeSiteRoot(siteRoot, localRoot)  // add subdir
 
             for (const filePath of FilesArray) {
+                counter--;
+                updateCounter(ws)
                 let newpage = true;
                 try {
-                    if (!optInt && (filePath.indexOf(data.site) != "-1")) continue;
                     const html = fs.readFileSync(filePath, 'utf8');
                     if (!html) {
                         console.log("Err " + filePath + " not read.");
                         continue;
                     }
                     const links = extractLinks(html);
-                    var subDir = filePath.slice(locLength + 1);
-                    let lio = subDir.lastIndexOf("/");
-                    if (lio == -1) {
-                        subDir = "";
-                    } else {
-                        subDir = subDir.slice(0, lio + 1);
-                    }
+                    let subDir = getSubdirectory(filePath.slice(locLength))
 
                     for (var link of links) {
+                        while(stopEvent) {
+                            await new Promise(resolve => setTimeout(resolve, 100)); // 100ms
+                        }
+                        if(DEBUG) console.log(link)
+
                         if (!hasProtocol(link)) {
-                            if (link[0] == "/") {
-                                link = siteRoot + link;
-                            } else {
-                                link = siteRoot + subDir + link;
+                            if(link[0] == "/") {
+                                link = new URL(link, siteDir).href;        
+                            }
+                            else {
+                                link = new URL(subDir + link, siteDir).href;    
                             }
                         }
+
+                        const isInternal = link.startsWith(siteRoot);
+                        if(isInternal && !optInt)  continue;
 
                         if(checkedLinks.includes(link)) continue;
 
                         let [reqStatus, code] = await getStatus(link);
 
                         if (DEBUG) console.log("getStatus " + reqStatus + " " + code + " " + link);
-                        const isInternal = link.startsWith(siteRoot);
-                        let toDisplay = optView && !isInternal;
+                        
+                        if(!optView && (code==200 || code==302 || code==303 || code==403)) continue;
 
-                        if (newpage && ((reqStatus !== "OK") || toDisplay)) {
-                            newpage = false;
-                            ws.send(JSON.stringify({
-                                type: 'PAGE_INFO',
-                                fileName: filePath,
-                                content: html,
-                                nlinks: links.length
-                            }));
-                        }
+                        let toDisplay = optView;
                         let itsArchive = isArchive(link)
                       
                         // Using curl
-                        if (hasCurl && (code == 403 || code == 406) && !itsArchive) {
+                        if (hasCurl && (code == 406) && !itsArchive) {
                             try {
                                 var ccode = await goCurl(link, ws);
                                 if (DEBUG) console.log("Code HTTP curl returns " + ccode + " " + link);
@@ -490,24 +525,36 @@ wss.on('connection', (ws) => {
                             code = ccode;
                             toDisplay = true  // for the link only
                         }
-                        else
-                        // Using fetchUrl/https
-                        if (toDisplay && (reqStatus === "OK" || code === 301) && !itsArchive) {
-                            const url = new URL(link).href;
-                            fetchUrl(url, ws);
-
-                            await new Promise((resolve) => {
-                                ws.once("message", (msg) => {
-                                    const data = JSON.parse(msg);
-                                    if (data.ready) resolve();
+                        else {
+                           // Using fetchUrl/https
+                            if (toDisplay && (reqStatus==="OK" || code===301 || code==403) && !itsArchive) {
+                                const url = new URL(link).href;
+                                fetchUrl(url, ws);
+                                await new Promise((resolve) => {
+                                    ws.once("message", (msg) => {
+                                        const data = JSON.parse(msg);
+                                        if (data.ready) resolve();
+                                    });
                                 });
-                            });
-                            await new Promise(resolve => setTimeout(resolve, pause * 1000));
+                                await new Promise(resolve => setTimeout(resolve, pause * 1000));
+                            }
                         }
 
-                        if(code==200 || code==302) checkedLinks.push(link) // forget checked valid links
+                        if(code==200 || code==302 || code==303 || code==403) {
+                            checkedLinks.push(link) // already checked valid links
+                        }
 
                         if (reqStatus != "OK" || toDisplay) {
+                            if (newpage) {
+                                newpage = false;
+                                ws.send(JSON.stringify({
+                                    type: 'PAGE_INFO',
+                                    fileName: filePath,
+                                    content: html,
+                                    nlinks: links.length
+                                }));
+                            }      
+                            console.log(link + " " + toDisplay)                      
                             ws.send(JSON.stringify({
                                 type: "CHECKED",
                                 link: link,
@@ -537,12 +584,10 @@ wss.on('connection', (ws) => {
             stopEvent = false;
         }
 
-        if (data.type === 'EXIT') {
-            server.close(() => {
-                beforeExit();
-                console.log("App closed.");
-                process.kill(process.pid, 'SIGINT');
-            });
+        if (data.type === 'EXIT') { 
+            console.log("Exit")
+            server.close(() => { });
+            process.exit(0);
         }
     }); // FIN de ws.on('message')
 }); // FIN de wss.on('connection')
